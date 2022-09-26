@@ -19,45 +19,20 @@
     Home: https://github.com/gorhill/uBlock
 */
 
-/* global uDom */
-
 'use strict';
 
 /******************************************************************************/
 
-{
-// >>>>> start of local scope
+import { sendMessage } from './ext.js';
+import { i18n$ } from './i18n.js';
+import { dom, qs$, qsa$ } from './dom.js';
+import { simpleStorage } from './storage.js';
 
 /******************************************************************************/
 
-const lastUpdateTemplateString = vAPI.i18n('3pLastUpdate');
-const obsoleteTemplateString = vAPI.i18n('3pExternalListObsolete');
-const reValidExternalList = /^[a-z-]+:\/\/(?:\S+\/\S*|\/\S+)/m;
-
-let listDetails = {};
+let cachedRulesetData = {};
 let filteringSettingsHash = '';
-let hideUnusedSet = new Set([ '*' ]);
-
-/******************************************************************************/
-
-const messaging = vAPI.messaging;
-
-vAPI.broadcastListener.add(msg => {
-    switch ( msg.what ) {
-    case 'assetUpdated':
-        updateAssetStatus(msg);
-        break;
-    case 'assetsUpdated':
-        document.body.classList.remove('updating');
-        renderWidgets();
-        break;
-    case 'staticFilteringDataChanged':
-        renderFilterLists();
-        break;
-    default:
-        break;
-    }
-});
+let hideUnusedSet = new Set([ 'regions' ]);
 
 /******************************************************************************/
 
@@ -68,112 +43,55 @@ const renderNumber = function(value) {
 /******************************************************************************/
 
 const renderFilterLists = function(soft) {
-    const listGroupTemplate = uDom('#templates .groupEntry');
-    const listEntryTemplate = uDom('#templates .listEntry');
-    const listStatsTemplate = vAPI.i18n('3pListsOfBlockedHostsPerListStats');
-    const renderElapsedTimeToString = vAPI.i18n.renderElapsedTimeToString;
+    const { enabledRulesets, rulesetDetails } = cachedRulesetData;
+    const listGroupTemplate = qs$('#templates .groupEntry');
+    const listEntryTemplate = qs$('#templates .listEntry');
+    const listStatsTemplate = i18n$('perRulesetStats');
     const groupNames = new Map([ [ 'user', '' ] ]);
 
-    // Assemble a pretty list name if possible
-    const listNameFromListKey = function(listKey) {
-        const list = listDetails.current[listKey] || listDetails.available[listKey];
-        const listTitle = list ? list.title : '';
-        if ( listTitle === '' ) { return listKey; }
-        return listTitle;
-    };
-
-    const liFromListEntry = function(listKey, li, hideUnused) {
-        const entry = listDetails.available[listKey];
+    const liFromListEntry = function(ruleset, li, hideUnused) {
         if ( !li ) {
-            li = listEntryTemplate.clone().nodeAt(0);
+            li = listEntryTemplate.cloneNode(true);
         }
-        const on = entry.off !== true;
+        const on = enabledRulesets.includes(ruleset.id);
         li.classList.toggle('checked', on);
-        let elem;
-        if ( li.getAttribute('data-listkey') !== listKey ) {
-            li.setAttribute('data-listkey', listKey);
-            elem = li.querySelector('input[type="checkbox"]');
-            elem.checked = on;
-            elem = li.querySelector('.listname');
-            elem.textContent = listNameFromListKey(listKey);
-            elem = li.querySelector('a.content');
-            elem.setAttribute('href', 'asset-viewer.html?url=' + encodeURIComponent(listKey));
-            elem.setAttribute('type', 'text/html');
-            li.classList.remove('toRemove');
-            if ( entry.supportName ) {
-                li.classList.add('support');
-                elem = li.querySelector('a.support');
-                elem.setAttribute('href', entry.supportURL);
-                elem.setAttribute('title', entry.supportName);
+        if ( dom.attr(li, 'data-listkey') !== ruleset.id ) {
+            dom.attr(li, 'data-listkey', ruleset.id);
+            qs$('input[type="checkbox"]', li).checked = on;
+            qs$('.listname', li).textContent = ruleset.name || ruleset.id;
+            dom.cl.remove(li, 'toRemove');
+            if ( ruleset.homeURL ) {
+                dom.cl.add(li, 'support');
+                const elem = qs$('a.support', li);
+                dom.attr(elem, 'href', ruleset.homeURL);
             } else {
-                li.classList.remove('support');
+                dom.cl.remove(li, 'support');
             }
-            if ( entry.external ) {
-                li.classList.add('external');
+            if ( ruleset.instructionURL ) {
+                dom.cl.add(li, 'mustread');
+                dom.attr(qs$('a.mustread', li), 'href', ruleset.instructionURL);
             } else {
-                li.classList.remove('external');
+                dom.cl.remove(li, 'mustread');
             }
-            if ( entry.instructionURL ) {
-                li.classList.add('mustread');
-                elem = li.querySelector('a.mustread');
-                elem.setAttribute('href', entry.instructionURL);
-            } else {
-                li.classList.remove('mustread');
-            }
-            li.classList.toggle('isDefault', entry.isDefault === true);
-            li.classList.toggle('unused', hideUnused && !on);
+            dom.cl.toggle(li, 'isDefault', ruleset.isDefault === true);
+            dom.cl.toggle(li, 'unused', hideUnused && !on);
         }
         // https://github.com/gorhill/uBlock/issues/1429
         if ( !soft ) {
-            li.querySelector('input[type="checkbox"]').checked = on;
+            qs$('input[type="checkbox"]', li).checked = on;
         }
-        elem = li.querySelector('span.counts');
-        let text = '';
-        if ( !isNaN(+entry.entryUsedCount) && !isNaN(+entry.entryCount) ) {
-            text = listStatsTemplate
-                .replace('{{used}}', renderNumber(on ? entry.entryUsedCount : 0))
-                .replace('{{total}}', renderNumber(entry.entryCount));
-        }
-        elem.textContent = text;
-        // https://github.com/chrisaljoudi/uBlock/issues/104
-        const asset = listDetails.cache[listKey] || {};
-        const remoteURL = asset.remoteURL;
-        li.classList.toggle(
-            'unsecure',
-            typeof remoteURL === 'string' && remoteURL.lastIndexOf('http:', 0) === 0
-        );
-        li.classList.toggle('failed', asset.error !== undefined);
-        li.classList.toggle('obsolete', asset.obsolete === true);
-        const lastUpdateString = lastUpdateTemplateString.replace(
-            '{{ago}}',
-            renderElapsedTimeToString(asset.writeTime || 0)
-        );
-        if ( asset.obsolete === true ) {
-            let title = obsoleteTemplateString;
-            if ( asset.cached && asset.writeTime !== 0 ) {
-                title += '\n' + lastUpdateString;
-            }
-            li.querySelector('.status.obsolete').setAttribute('title', title);
-        }
-        if ( asset.cached === true ) {
-            li.classList.add('cached');
-            li.querySelector('.status.cache').setAttribute(
-                'title',
-                lastUpdateString
-            );
-        } else {
-            li.classList.remove('cached');
-        }
-        li.classList.remove('discard');
+        li.title = listStatsTemplate
+            .replace('{{ruleCount}}', renderNumber(ruleset.rules.accepted))
+            .replace('{{filterCount}}', renderNumber(ruleset.filters.accepted));
         return li;
     };
 
-    const listEntryCountFromGroup = function(listKeys) {
-        if ( Array.isArray(listKeys) === false ) { return ''; }
+    const listEntryCountFromGroup = function(groupRulesets) {
+        if ( Array.isArray(groupRulesets) === false ) { return ''; }
         let count = 0,
             total = 0;
-        for ( const listKey of listKeys ) {
-            if ( listDetails.available[listKey].off !== true ) {
+        for ( const ruleset of groupRulesets ) {
+            if ( enabledRulesets.includes(ruleset.id) ) {
                 count += 1;
             }
             total += 1;
@@ -183,32 +101,32 @@ const renderFilterLists = function(soft) {
             '';
     };
 
-    const liFromListGroup = function(groupKey, listKeys) {
-        let liGroup = document.querySelector(`#lists > .groupEntry[data-groupkey="${groupKey}"]`);
+    const liFromListGroup = function(groupKey, groupRulesets) {
+        let liGroup = qs$(`#lists > .groupEntry[data-groupkey="${groupKey}"]`);
         if ( liGroup === null ) {
-            liGroup = listGroupTemplate.clone().nodeAt(0);
+            liGroup = listGroupTemplate.cloneNode(true);
             let groupName = groupNames.get(groupKey);
             if ( groupName === undefined ) {
-                groupName = vAPI.i18n('3pGroup' + groupKey.charAt(0).toUpperCase() + groupKey.slice(1));
+                groupName = i18n$('3pGroup' + groupKey.charAt(0).toUpperCase() + groupKey.slice(1));
                 groupNames.set(groupKey, groupName);
             }
             if ( groupName !== '' ) {
-                liGroup.querySelector('.geName').textContent = groupName;
+                qs$('.geName', liGroup).textContent = groupName;
             }
         }
-        if ( liGroup.querySelector('.geName:empty') === null ) {
-            liGroup.querySelector('.geCount').textContent = listEntryCountFromGroup(listKeys);
+        if ( qs$('.geName:empty', liGroup) === null ) {
+            qs$('.geCount', liGroup).textContent = listEntryCountFromGroup(groupRulesets);
         }
-        let hideUnused = mustHideUnusedLists(groupKey);
+        const hideUnused = mustHideUnusedLists(groupKey);
         liGroup.classList.toggle('hideUnused', hideUnused);
-        let ulGroup = liGroup.querySelector('.listEntries');
-        if ( !listKeys ) { return liGroup; }
-        listKeys.sort(function(a, b) {
-            return (listDetails.available[a].title || '').localeCompare(listDetails.available[b].title || '');
+        const ulGroup = qs$('.listEntries', liGroup);
+        if ( !groupRulesets ) { return liGroup; }
+        groupRulesets.sort(function(a, b) {
+            return (a.name || '').localeCompare(b.name || '');
         });
-        for ( let i = 0; i < listKeys.length; i++ ) {
-            let liEntry = liFromListEntry(
-                listKeys[i],
+        for ( let i = 0; i < groupRulesets.length; i++ ) {
+            const liEntry = liFromListEntry(
+                groupRulesets[i],
                 ulGroup.children[i],
                 hideUnused
             );
@@ -219,327 +137,146 @@ const renderFilterLists = function(soft) {
         return liGroup;
     };
 
-    const groupsFromLists = function(lists) {
-        let groups = new Map();
-        let listKeys = Object.keys(lists);
-        for ( let listKey of listKeys ) {
-            let list = lists[listKey];
-            let groupKey = list.group || 'nogroup';
-            if ( groupKey === 'social' ) {
-                groupKey = 'annoyances';
-            }
-            let memberKeys = groups.get(groupKey);
-            if ( memberKeys === undefined ) {
-                groups.set(groupKey, (memberKeys = []));
-            }
-            memberKeys.push(listKey);
-        }
-        return groups;
-    };
+    // Incremental rendering: this will allow us to easily discard unused
+    // DOM list entries.
+    dom.cl.add(
+        qsa$('#lists .listEntries .listEntry[data-listkey]'),
+        'discard'
+    );
 
-    const onListsReceived = function(details) {
-        // Before all, set context vars
-        listDetails = details;
-
-        // "My filters" will now sit in its own group. The following code
-        // ensures smooth transition.
-        listDetails.available['user-filters'].group = 'user';
-
-        // Incremental rendering: this will allow us to easily discard unused
-        // DOM list entries.
-        uDom('#lists .listEntries .listEntry[data-listkey]').addClass('discard');
-
-        // Remove import widget while we recreate list of lists.
-        const importWidget = uDom('.listEntry.toImport').detach();
-
-        // Visually split the filter lists in purpose-based groups
-        const ulLists = document.querySelector('#lists');
-        const groups = groupsFromLists(details.available);
-        const groupKeys = [
-            'user',
+    // Visually split the filter lists in three groups
+    const ulLists = qs$('#lists');
+    const groups = new Map([
+        [
             'default',
-            'ads',
-            'privacy',
-            'malware',
-            'annoyances',
-            'multipurpose',
+            rulesetDetails.filter(ruleset =>
+                ruleset.id === 'default' 
+            ),
+        ],
+        [
+            'misc',
+            rulesetDetails.filter(ruleset =>
+                ruleset.id !== 'default' && typeof ruleset.lang !== 'string' 
+            ),
+        ],
+        [
             'regions',
-            'custom'
-        ];
-        document.body.classList.toggle('hideUnused', mustHideUnusedLists('*'));
-        for ( let i = 0; i < groupKeys.length; i++ ) {
-            let groupKey = groupKeys[i];
-            let liGroup = liFromListGroup(groupKey, groups.get(groupKey));
-            liGroup.setAttribute('data-groupkey', groupKey);
-            if ( liGroup.parentElement === null ) {
-                ulLists.appendChild(liGroup);
-            }
-            groups.delete(groupKey);
+            rulesetDetails.filter(ruleset =>
+                typeof ruleset.lang === 'string' 
+            ),
+        ],
+    ]);
+
+    dom.cl.toggle(dom.body, 'hideUnused', mustHideUnusedLists('*'));
+
+    for ( const [ groupKey, groupRulesets ] of groups ) {
+        let liGroup = liFromListGroup(groupKey, groupRulesets);
+        liGroup.setAttribute('data-groupkey', groupKey);
+        if ( liGroup.parentElement === null ) {
+            ulLists.appendChild(liGroup);
         }
-        // For all groups not covered above (if any left)
-        for ( const groupKey of Object.keys(groups) ) {
-            ulLists.appendChild(liFromListGroup(groupKey, groupKey));
-        }
+    }
 
-        uDom('#lists .listEntries .listEntry.discard').remove();
+    dom.remove(qsa$('#lists .listEntries .listEntry.discard'));
 
-        // Re-insert import widget.
-        uDom('[data-groupkey="custom"] .listEntries').append(importWidget);
+    // Compute a hash of the settings so that we can keep track of changes
+    // affecting the loading of filter lists.
+    if ( !soft ) {
+        filteringSettingsHash = hashFromCurrentFromSettings();
+    }
 
-        uDom.nodeFromId('autoUpdate').checked =
-            listDetails.autoUpdate === true;
-        uDom.nodeFromId('listsOfBlockedHostsPrompt').textContent =
-            vAPI.i18n('3pListsOfBlockedHostsPrompt')
-                .replace(
-                    '{{netFilterCount}}',
-                    renderNumber(details.netFilterCount)
-                )
-                .replace(
-                    '{{cosmeticFilterCount}}',
-                    renderNumber(details.cosmeticFilterCount)
-                );
-        uDom.nodeFromId('parseCosmeticFilters').checked =
-            listDetails.parseCosmeticFilters === true;
-        uDom.nodeFromId('ignoreGenericCosmeticFilters').checked =
-            listDetails.ignoreGenericCosmeticFilters === true;
-        uDom.nodeFromId('suspendUntilListsAreLoaded').checked =
-            listDetails.suspendUntilListsAreLoaded === true;
-
-        // Compute a hash of the settings so that we can keep track of changes
-        // affecting the loading of filter lists.
-        if ( !soft ) {
-            filteringSettingsHash = hashFromCurrentFromSettings();
-        }
-
-        // https://github.com/gorhill/uBlock/issues/2394
-        document.body.classList.toggle('updating', listDetails.isUpdating);
-
-        renderWidgets();
-    };
-
-    messaging.send('dashboard', {
-        what: 'getLists',
-    }).then(details => {
-        onListsReceived(details);
-    });
+    renderWidgets();
 };
 
 /******************************************************************************/
 
 const renderWidgets = function() {
-    let cl = uDom.nodeFromId('buttonApply').classList;
-    cl.toggle(
+    dom.cl.toggle(
+        qs$('#buttonApply'),
         'disabled',
         filteringSettingsHash === hashFromCurrentFromSettings()
     );
-    const updating = document.body.classList.contains('updating');
-    cl = uDom.nodeFromId('buttonUpdate').classList;
-    cl.toggle('active', updating);
-    cl.toggle(
-        'disabled',
-        updating === false &&
-        document.querySelector('#lists .listEntry.obsolete:not(.toRemove) input[type="checkbox"]:checked') === null
-        );
-    cl = uDom.nodeFromId('buttonPurgeAll').classList;
-    cl.toggle(
-        'disabled',
-        updating || document.querySelector('#lists .listEntry.cached:not(.obsolete)') === null
+
+    // Compute total counts
+    const rulesetMap = new Map(
+        cachedRulesetData.rulesetDetails.map(rule => [ rule.id, rule ])
     );
+    let filterCount = 0;
+    let ruleCount = 0;
+    for ( const liEntry of qsa$('#lists .listEntry[data-listkey]') ) {
+        if ( qs$('input[type="checkbox"]:checked', liEntry)  === null ) { continue; }
+        const ruleset = rulesetMap.get(liEntry.dataset.listkey);
+        if ( ruleset === undefined ) { continue; }
+        filterCount += ruleset.filters.accepted;
+        ruleCount += ruleset.rules.accepted;
+    }
+    qs$('#listsOfBlockedHostsPrompt').textContent = i18n$('perRulesetStats')
+        .replace('{{ruleCount}}', ruleCount.toLocaleString())
+        .replace('{{filterCount}}', filterCount.toLocaleString());
 };
 
 /******************************************************************************/
 
-const updateAssetStatus = function(details) {
-    const li = document.querySelector(
-        '#lists .listEntry[data-listkey="' + details.key + '"]'
-    );
-    if ( li === null ) { return; }
-    li.classList.toggle('failed', !!details.failed);
-    li.classList.toggle('obsolete', !details.cached);
-    li.classList.toggle('cached', !!details.cached);
-    if ( details.cached ) {
-        li.querySelector('.status.cache').setAttribute(
-            'title',
-            lastUpdateTemplateString.replace(
-                '{{ago}}',
-                vAPI.i18n.renderElapsedTimeToString(Date.now())
-            )
-        );
-    }
-    renderWidgets();
-};
-
-/*******************************************************************************
-
-    Compute a hash from all the settings affecting how filter lists are loaded
-    in memory.
-
-**/
-
 const hashFromCurrentFromSettings = function() {
-    const hash = [
-        uDom.nodeFromId('parseCosmeticFilters').checked,
-        uDom.nodeFromId('ignoreGenericCosmeticFilters').checked
-    ];
+    const hash = [];
     const listHash = [];
-    const listEntries = document.querySelectorAll('#lists .listEntry[data-listkey]:not(.toRemove)');
-    for ( const liEntry of listEntries ) {
-        if ( liEntry.querySelector('input[type="checkbox"]:checked') !== null ) {
-            listHash.push(liEntry.getAttribute('data-listkey'));
+    for ( const liEntry of qsa$('#lists .listEntry[data-listkey]') ) {
+        if ( qs$('input[type="checkbox"]:checked', liEntry) ) {
+            listHash.push(dom.attr(liEntry, 'data-listkey'));
         }
     }
-    hash.push(
-        listHash.sort().join(),
-        uDom.nodeFromId('importLists').checked &&
-            reValidExternalList.test(uDom.nodeFromId('externalLists').value),
-        document.querySelector('#lists .listEntry.toRemove') !== null
-    );
+    hash.push(listHash.sort().join());
     return hash.join();
 };
 
+self.hasUnsavedData = function() {
+    return hashFromCurrentFromSettings() !== filteringSettingsHash;
+};
+
 /******************************************************************************/
 
-const onListsetChanged = function(ev) {
+function onListsetChanged(ev) {
     const input = ev.target;
     const li = input.closest('.listEntry');
-    li.classList.toggle('checked', input.checked);
-    onFilteringSettingsChanged();
-};
-
-/******************************************************************************/
-
-const onFilteringSettingsChanged = function() {
+    dom.cl.toggle(li, 'checked', input.checked);
     renderWidgets();
-};
+}
+
+dom.on(
+    qs$('#lists'),
+    'change',
+    '.listEntry input',
+    onListsetChanged
+);
 
 /******************************************************************************/
 
-const onRemoveExternalList = function(ev) {
-    const liEntry = ev.target.closest('[data-listkey]');
-    if ( liEntry === null ) { return; }
-    liEntry.classList.toggle('toRemove');
-    renderWidgets();
-};
-
-/******************************************************************************/
-
-const onPurgeClicked = function(ev) {
-    const liEntry = ev.target.closest('[data-listkey]');
-    const listKey = liEntry.getAttribute('data-listkey') || '';
-    if ( listKey === '' ) { return; }
-
-    messaging.send('dashboard', {
-        what: 'purgeCache',
-        assetKey: listKey,
-    });
-
-    // If the cached version is purged, the installed version must be assumed
-    // to be obsolete.
-    // https://github.com/gorhill/uBlock/issues/1733
-    //   An external filter list must not be marked as obsolete, they will
-    //   always be fetched anyways if there is no cached copy.
-    liEntry.classList.add('obsolete');
-    liEntry.classList.remove('cached');
-
-    if ( liEntry.querySelector('input[type="checkbox"]').checked ) {
-        renderWidgets();
-    }
-};
-
-/******************************************************************************/
-
-const selectFilterLists = async function() {
-    // Cosmetic filtering switch
-    messaging.send('dashboard', {
-        what: 'userSettings',
-        name: 'parseAllABPHideFilters',
-        value: uDom.nodeFromId('parseCosmeticFilters').checked,
-    });
-    messaging.send('dashboard', {
-        what: 'userSettings',
-        name: 'ignoreGenericCosmeticFilters',
-        value: uDom.nodeFromId('ignoreGenericCosmeticFilters').checked,
-    });
-
-    // Filter lists to select
-    const toSelect = [];
-    for (
-        const liEntry of
-        document.querySelectorAll('#lists .listEntry[data-listkey]:not(.toRemove)')
-    ) {
-        if ( liEntry.querySelector('input[type="checkbox"]:checked') !== null ) {
-            toSelect.push(liEntry.getAttribute('data-listkey'));
-        }
+const applyEnabledRulesets = async function() {
+    const enabledRulesets = [];
+    for ( const liEntry of qsa$('#lists .listEntry[data-listkey]') ) {
+        if ( qs$('input[type="checkbox"]:checked', liEntry) === null ) { continue; }
+        enabledRulesets.push(liEntry.dataset.listkey);
     }
 
-    // External filter lists to remove
-    const toRemove = [];
-    for (
-        const liEntry of
-        document.querySelectorAll('#lists .listEntry.toRemove[data-listkey]')
-    ) {
-        toRemove.push(liEntry.getAttribute('data-listkey'));
-    }
-
-    // External filter lists to import
-    const externalListsElem = document.getElementById('externalLists');
-    const toImport = externalListsElem.value.trim();
-    {
-        const liEntry = externalListsElem.closest('.listEntry');
-        liEntry.classList.remove('checked');
-        liEntry.querySelector('input[type="checkbox"]').checked = false;
-        externalListsElem.value = '';
-    }
-
-    await messaging.send('dashboard', {
-        what: 'applyFilterListSelection',
-        toSelect: toSelect,
-        toImport: toImport,
-        toRemove: toRemove,
+    await sendMessage({
+        what: 'applyRulesets',
+        enabledRulesets,
     });
 
     filteringSettingsHash = hashFromCurrentFromSettings();
 };
 
-/******************************************************************************/
-
 const buttonApplyHandler = async function() {
-    uDom('#buttonApply').removeClass('enabled');
-    await selectFilterLists();
+    dom.cl.remove(qs$('#buttonApply'), 'enabled');
+    await applyEnabledRulesets();
     renderWidgets();
-    messaging.send('dashboard', { what: 'reloadAllFilters' });
 };
 
-/******************************************************************************/
-
-const buttonUpdateHandler = async function() {
-    await selectFilterLists();
-    document.body.classList.add('updating');
-    renderWidgets();
-    messaging.send('dashboard', { what: 'forceUpdateAssets' });
-};
-
-/******************************************************************************/
-
-const buttonPurgeAllHandler = async function(hard) {
-    uDom('#buttonPurgeAll').removeClass('enabled');
-    await messaging.send('dashboard', {
-        what: 'purgeAllCaches',
-        hard,
-    });
-    renderFilterLists(true);
-};
-
-/******************************************************************************/
-
-const userSettingCheckboxChanged = function() {
-    const target = event.target;
-    messaging.send('dashboard', {
-        what: 'userSettings',
-        name: target.id,
-        value: target.checked,
-    });
-};
+dom.on(
+    qs$('#buttonApply'),
+    'click',
+    ( ) => { buttonApplyHandler(); }
+);
 
 /******************************************************************************/
 
@@ -563,7 +300,7 @@ const toggleHideUnusedLists = function(which) {
             hideUnusedSet.add(which);
         }
         document.body.classList.toggle('hideUnused', mustHide);
-        uDom('.groupEntry[data-groupkey]').toggleClass('hideUnused', mustHide);
+        dom.cl.toggle(qsa$('.groupEntry[data-groupkey]'), 'hideUnused', mustHide);
     } else {
         const doesHide = hideUnusedSet.has(which);
         if ( doesHide ) {
@@ -572,38 +309,37 @@ const toggleHideUnusedLists = function(which) {
             hideUnusedSet.add(which);
         }
         mustHide = doesHide === doesHideAll;
-        groupSelector = '.groupEntry[data-groupkey="' + which + '"] ';
-        uDom(groupSelector).toggleClass('hideUnused', mustHide);
+        groupSelector = `.groupEntry[data-groupkey="${which}"]`;
+        dom.cl.toggle(qsa$(groupSelector), 'hideUnused', mustHide);
     }
-    uDom(groupSelector + '.listEntry input[type="checkbox"]:not(:checked)')
-        .ancestors('.listEntry[data-listkey]')
-        .toggleClass('unused', mustHide);
-    vAPI.localStorage.setItem(
+
+    for ( const elem of qsa$(`#lists ${groupSelector} .listEntry[data-listkey] input[type="checkbox"]:not(:checked)`) ) {
+        dom.cl.toggle(
+            elem.closest('.listEntry[data-listkey]'),
+            'unused',
+            mustHide
+        );
+    }
+
+    simpleStorage.setItem(
         'hideUnusedFilterLists',
         Array.from(hideUnusedSet)
     );
 };
 
-const revealHiddenUsedLists = function() {
-    uDom('#lists .listEntry.unused input[type="checkbox"]:checked')
-        .ancestors('.listEntry[data-listkey]')
-        .removeClass('unused');
-};
-
-uDom('#listsOfBlockedHostsPrompt').on('click', function() {
-    toggleHideUnusedLists('*');
-});
-
-uDom('#lists').on('click', '.groupEntry[data-groupkey] > .geDetails', function(ev) {
-    toggleHideUnusedLists(
-        uDom(ev.target)
-            .ancestors('.groupEntry[data-groupkey]')
-            .attr('data-groupkey')
-    );
-});
+dom.on(
+    qs$('#lists'),
+    'click',
+    '.groupEntry[data-groupkey] > .geDetails',
+    ev => {
+        toggleHideUnusedLists(
+            dom.attr(ev.target.closest('[data-groupkey]'), 'data-groupkey')
+        );
+    }
+);
 
 // Initialize from saved state.
-vAPI.localStorage.getItemAsync('hideUnusedFilterLists').then(value => {
+simpleStorage.getItem('hideUnusedFilterLists').then(value => {
     if ( Array.isArray(value) ) {
         hideUnusedSet = new Set(value);
     }
@@ -611,107 +347,17 @@ vAPI.localStorage.getItemAsync('hideUnusedFilterLists').then(value => {
 
 /******************************************************************************/
 
-// Cloud-related.
-
-const toCloudData = function() {
-    const bin = {
-        parseCosmeticFilters: uDom.nodeFromId('parseCosmeticFilters').checked,
-        ignoreGenericCosmeticFilters: uDom.nodeFromId('ignoreGenericCosmeticFilters').checked,
-        selectedLists: []
-    };
-
-    const liEntries = document.querySelectorAll('#lists .listEntry');
-    for ( const liEntry of liEntries ) {
-        if ( liEntry.querySelector('input').checked ) {
-            bin.selectedLists.push(liEntry.getAttribute('data-listkey'));
-        }
+sendMessage({
+    what: 'getRulesetData',
+}).then(data => {
+    if ( !data ) { return; }
+    cachedRulesetData = data;
+    try {
+        renderFilterLists();
+    } catch(ex) {
     }
-
-    return bin;
-};
-
-const fromCloudData = function(data, append) {
-    if ( typeof data !== 'object' || data === null ) { return; }
-
-    let elem, checked;
-
-    elem = uDom.nodeFromId('parseCosmeticFilters');
-    checked = data.parseCosmeticFilters === true || append && elem.checked;
-    elem.checked = listDetails.parseCosmeticFilters = checked;
-
-    elem = uDom.nodeFromId('ignoreGenericCosmeticFilters');
-    checked = data.ignoreGenericCosmeticFilters === true || append && elem.checked;
-    elem.checked = listDetails.ignoreGenericCosmeticFilters = checked;
-
-    const selectedSet = new Set(data.selectedLists);
-    const listEntries = uDom('#lists .listEntry');
-    for ( let i = 0, n = listEntries.length; i < n; i++ ) {
-        const listEntry = listEntries.at(i);
-        const listKey = listEntry.attr('data-listkey');
-        const hasListKey = selectedSet.has(listKey);
-        selectedSet.delete(listKey);
-        const input = listEntry.descendants('input').first();
-        if ( append && input.prop('checked') ) { continue; }
-        input.prop('checked', hasListKey);
-    }
-
-    // If there are URL-like list keys left in the selected set, import them.
-    for ( const listKey of selectedSet ) {
-        if ( reValidExternalList.test(listKey) === false ) {
-            selectedSet.delete(listKey);
-        }
-    }
-    if ( selectedSet.size !== 0 ) {
-        elem = uDom.nodeFromId('externalLists');
-        if ( append ) {
-            if ( elem.value.trim() !== '' ) { elem.value += '\n'; }
-        } else {
-            elem.value = '';
-        }
-        elem.value += Array.from(selectedSet).join('\n');
-        uDom.nodeFromId('importLists').checked = true;
-    }
-
-    revealHiddenUsedLists();
-    renderWidgets();
-};
-
-self.cloud.onPush = toCloudData;
-self.cloud.onPull = fromCloudData;
-
-/******************************************************************************/
-
-self.hasUnsavedData = function() {
-    return hashFromCurrentFromSettings() !== filteringSettingsHash;
-};
-
-/******************************************************************************/
-
-uDom('#autoUpdate').on('change', userSettingCheckboxChanged);
-uDom('#parseCosmeticFilters').on('change', onFilteringSettingsChanged);
-uDom('#ignoreGenericCosmeticFilters').on('change', onFilteringSettingsChanged);
-uDom('#suspendUntilListsAreLoaded').on('change', userSettingCheckboxChanged);
-uDom('#buttonApply').on('click', ( ) => { buttonApplyHandler(); });
-uDom('#buttonUpdate').on('click', ( ) => { buttonUpdateHandler(); });
-uDom('#buttonPurgeAll').on('click', ev => {
-    buttonPurgeAllHandler(ev.shiftKey);
-});
-uDom('#lists').on('change', '.listEntry input', onListsetChanged);
-uDom('#lists').on('click', '.listEntry .remove', onRemoveExternalList);
-uDom('#lists').on('click', 'span.cache', onPurgeClicked);
-uDom('#externalLists').on('input', onFilteringSettingsChanged);
-
-uDom('#lists').on('click', '.listEntry label *', ev => {
-    if ( ev.target.matches('a,input,.forinput') ) { return; }
-    ev.preventDefault();
+}).catch(reason => {
+    console.trace(reason);
 });
 
 /******************************************************************************/
-
-renderFilterLists();
-
-/******************************************************************************/
-
-// <<<<< end of local scope
-}
-

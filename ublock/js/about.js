@@ -19,16 +19,17 @@
     Home: https://github.com/gorhill/uBlock
 */
 
-/* global uDom */
-
 'use strict';
 
 /******************************************************************************/
 
-(async ( ) => {
-    const appData = await vAPI.messaging.send('dashboard', {
-        what: 'getAppData',
-    });
+import { runtime } from './ext.js';
+import { qs$ } from './dom.js';
 
-    uDom('#aboutNameVer').text(appData.name + ' ' + appData.version);
+/******************************************************************************/
+
+(async ( ) => {
+    const manifest = runtime.getManifest();
+
+    qs$('#aboutNameVer').textContent = `${manifest.name} ${manifest.version}`;
 })();

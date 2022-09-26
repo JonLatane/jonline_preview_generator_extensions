@@ -7,7 +7,7 @@ body {
     }
 #actions {
     background-color: var(--surface-1);
-    padding: var(--default-gap-small) 0 var(--default-gap-xsmall) 0;
+    padding: 0.5em 0;
     position: sticky;
     top: 0;
     z-index: 10;
@@ -19,14 +19,10 @@ body {
     animation: spin 1s linear infinite;
     transform-origin: 50%;
     }
-#listsOfBlockedHostsPrompt {
-    cursor: pointer;
-    }
 #lists {
     margin: 0.5em 0 0 0;
     padding: 0;
     }
-#listsOfBlockedHostsPrompt::before,
 .groupEntry:not([data-groupkey="user"]) .geDetails::before {
     color: var(--ink-3);
     content: '\2212';
@@ -35,7 +31,6 @@ body {
     margin-inline-end: 0.25em;
     -webkit-margin-end: 0.25em;
     }
-body.hideUnused #listsOfBlockedHostsPrompt::before,
 .groupEntry.hideUnused:not([data-groupkey="user"]) .geDetails::before {
     content: '+';
     }
@@ -63,6 +58,7 @@ body.hideUnused #listsOfBlockedHostsPrompt::before,
 .listEntry > * {
     margin-left: 0;
     margin-right: 0;
+    text-transform: capitalize;
     unicode-bidi: embed;
     }
 .listEntry .listname {
@@ -189,4 +185,8 @@ body.updating .listEntry.checked.obsolete .updating {
     }
 :root.mobile .li.listEntry .iconbar {
     margin-top: 0.2em;
+    }
+
+#templates {
+    display: none;
     }
